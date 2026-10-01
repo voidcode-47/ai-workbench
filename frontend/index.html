@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Workbench</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- ==================== 登录页 ==================== -->
+<div id="loginView" class="login-view">
+    <div class="login-card">
+        <div class="login-brand">
+            <div class="login-logo">AW</div>
+            <h1>AI Workbench</h1>
+            <p>知识库 · 智能助手 · 图片理解 · 工作流</p>
+        </div>
+        <form id="loginForm" autocomplete="off">
+            <label class="field-label" for="loginUser">用户名</label>
+            <input id="loginUser" class="input" placeholder="请输入用户名" autofocus>
+            <label class="field-label" for="loginPass">密码</label>
+            <input id="loginPass" class="input" type="password" placeholder="请输入密码">
+            <div id="loginError" class="form-error"></div>
+            <button type="submit" class="btn primary block" id="btnLogin">登 录</button>
+        </form>
+    </div>
+</div>
+
+<!-- ==================== 主应用 ==================== -->
+<div id="appView" class="app" hidden>
+    <aside class="sidebar">
+        <div class="sidebar-brand">
+            <div class="login-logo small">AW</div>
+            <span>AI Workbench</span>
+        </div>
+        <nav class="sidebar-nav">
+            <button class="nav-item active" data-tab="rag">知识库</button>
+            <button class="nav-item" data-tab="agent">智能助手</button>
+            <button class="nav-item" data-tab="multimodal">图片理解</button>
+            <button class="nav-item" data-tab="workflow">工作流</button>
+            <button class="nav-item" data-tab="users" id="navUsers" hidden>用户管理</button>
+        </nav>
+        <div class="sidebar-footer">
+            <div class="user-box">
+                <div class="user-meta">
+                    <span class="user-name" id="currentUser">-</span>
+                    <span class="role-badge" id="currentRole">-</span>
+                </div>
+                <button class="btn ghost small" id="btnChangePwd">修改密码</button>
+                <button class="btn ghost small" id="btnLogout">退出</button>
+            </div>
+        </div>
+    </aside>
+
+    <div class="main">
+        <header class="topbar">
+            <h2 id="pageTitle">知识库</h2>
+        </header>
+
+        <main class="content">
+            <!-- ========== RAG ========== -->
+            <section class="panel active" id="panel-rag">
+                <div class="grid two-col">
+                    <div class="card">
+                        <div class="card-head">
+                            <h3>知识库管理</h3>
+                            <button class="btn ghost small" id="btnRefreshKb">刷新</button>
+                        </div>
+                        <div class="form-row">
+                            <input id="kbId" class="input" placeholder="知识库 ID，如 sales">
+                            <input id="kbName" class="input" placeholder="显示名称（可选）">
+                            <button class="btn primary" id="btnCreateKb">创建</button>
+                        </div>
+                        <select id="kbSelect" size="6" class="kb-list"></select>
+                        <div class="form-row">
+                            <input type="file" id="kbFiles" multiple accept=".pdf,.docx,.txt,.md,.csv,.xlsx,.pptx">
+                            <button class="btn primary" id="btnUpload">上传文档</button>
+                        </div>
+                        <div class="form-row">
+                            <button class="btn ghost wide" id="btnReindex">重建索引</button>
+                            <button class="btn danger wide" id="btnDeleteKb">删除知识库</button>
+                        </div>
+                        <div id="docList" class="doc-list"></div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-head"><h3>知识库问答</h3></div>
+                        <div id="ragChat" class="chat-box"></div>
+                        <div class="form-row">
+                            <input id="ragQuestion" class="input" placeholder="针对所选知识库提问…">
+                            <button class="btn primary" id="btnAsk">提问</button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ========== Agent ========== -->
+            <section class="panel" id="panel-agent">
+                <div class="card">
+                    <div class="card-head">
+                        <h3>智能助手 <span class="hint" id="toolListHint"></span></h3>
+                    </div>
+                    <div id="agentChat" class="chat-box tall"></div>
+                    <div class="form-row">
+                        <input id="agentMessage" class="input" placeholder="让助手计算、搜索、查库…">
+                        <button class="btn primary" id="btnAgentSend">发送</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ========== Multimodal ========== -->
+            <section class="panel" id="panel-multimodal">
+                <div class="grid two-col">
+                    <div class="card">
+                        <div class="card-head"><h3>图片输入</h3></div>
+                        <input type="file" id="imageFile" accept="image/png,image/jpeg,image/gif,image/webp">
+                        <div class="preview-wrap"><img id="imagePreview" alt="预览"></div>
+                        <label class="field-label" for="mmTask">任务类型</label>
+                        <select id="mmTask" class="input">
+                            <option value="describe">图片描述</option>
+                            <option value="question">图片问答</option>
+                            <option value="ocr">OCR 文字提取</option>
+                            <option value="table">表格结构化（Markdown）</option>
+                        </select>
+                        <input id="mmQuestion" class="input" placeholder="question 任务时填写你的问题" style="display:none">
+                        <button class="btn primary wide" id="btnAnalyze">开始分析</button>
+                    </div>
+                    <div class="card">
+                        <div class="card-head"><h3>分析结果</h3></div>
+                        <div id="mmResult" class="result-box">结果将展示在这里</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ========== Workflow ========== -->
+            <section class="panel" id="panel-workflow">
+                <div class="grid two-col">
+                    <div class="card">
+                        <div class="card-head">
+                            <h3>流程定义（JSON / DAG）</h3>
+                            <button class="btn ghost small" id="btnLoadTpl">载入模板</button>
+                        </div>
+                        <div class="form-row">
+                            <select id="tplSelect" class="input"></select>
+                        </div>
+                        <textarea id="wfDefinition" class="code-editor" spellcheck="false"></textarea>
+                        <label class="field-label">运行时输入（JSON）</label>
+                        <textarea id="wfInputs" class="code-editor small" spellcheck="false">{}</textarea>
+                        <button class="btn primary wide" id="btnRunWf">执行工作流</button>
+                    </div>
+                    <div class="card">
+                        <div class="card-head"><h3>执行结果与日志</h3></div>
+                        <div id="wfOutputs" class="result-box">尚未执行</div>
+                        <div id="wfLogs" class="log-box"></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ========== Users（管理员） ========== -->
+            <section class="panel" id="panel-users">
+                <div class="card">
+                    <div class="card-head">
+                        <h3>用户管理</h3>
+                    </div>
+                    <div class="form-row">
+                        <input id="newUserName" class="input" placeholder="用户名">
+                        <input id="newUserPass" class="input" type="password" placeholder="初始密码（至少 6 位）">
+                        <select id="newUserRole" class="input">
+                            <option value="employee">普通员工</option>
+                            <option value="admin">管理员</option>
+                        </select>
+                        <button class="btn primary" id="btnAddUser">创建用户</button>
+                    </div>
+                    <table class="table">
+                        <thead><tr><th>用户名</th><th>角色</th><th>创建时间</th><th>操作</th></tr></thead>
+                        <tbody id="usersTable"></tbody>
+                    </table>
+                </div>
+            </section>
+        </main>
+    </div>
+</div>
+
+<!-- ==================== 修改密码弹窗 ==================== -->
+<div id="pwdModal" class="modal-mask" hidden>
+    <div class="modal">
+        <h3>修改密码</h3>
+        <input id="chgOld" class="input" type="password" placeholder="原密码">
+        <input id="chgNew" class="input" type="password" placeholder="新密码（至少 6 位）">
+        <input id="chgConfirm" class="input" type="password" placeholder="确认新密码">
+        <div id="pwdError" class="form-error"></div>
+        <div class="modal-actions">
+            <button class="btn ghost" id="btnChgCancel">取消</button>
+            <button class="btn primary" id="btnChgOk">确认修改</button>
+        </div>
+    </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

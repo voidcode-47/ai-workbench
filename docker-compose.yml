@@ -1,0 +1,12 @@
+services:
+  ai-workbench:
+    build: .
+    container_name: ai-workbench
+    ports:
+      # 默认仅本机可访问；如需对外提供服务，改为 "8000:8000" 并务必设置 API_KEY
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
