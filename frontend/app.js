@@ -91,6 +91,12 @@ function logout(notify = true) {
     localStorage.removeItem(USER_KEY);
     currentUser = null;
     currentKb = null;
+    // 清空会话数据：否则同一浏览器里下一位登录者会看到上一位的对话，
+    // 且这些历史会被当作上下文重新发给模型
+    agentHistory.length = 0;
+    ragHistory.length = 0;
+    $("agentChat").replaceChildren();
+    $("ragChat").replaceChildren();
     $("pwdModal").hidden = true;   // 关闭可能挂着的弹窗
     $("appView").hidden = true;
     $("loginView").hidden = false;
@@ -111,6 +117,7 @@ function enterApp() {
     loadKbs().catch((e) => toast(e.message, "error"));
     loadTools();
     loadTemplates();
+    loadModelConfig();
     if (currentUser.role === "admin") loadUsers().catch(() => {});
 }
 
@@ -120,9 +127,10 @@ function switchTab(tab) {
     document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
     const panel = $("panel-" + tab);
     if (panel) panel.classList.add("active");
-    const titles = { rag: "知识库", agent: "智能助手", multimodal: "图片理解", workflow: "工作流", users: "用户管理" };
+    const titles = { rag: "知识库", agent: "智能助手", multimodal: "图片理解", workflow: "工作流", models: "模型接入", users: "用户管理" };
     $("pageTitle").textContent = titles[tab] || "AI Workbench";
     if (tab === "users" && currentUser?.role === "admin") loadUsers().catch(() => {});
+    if (tab === "models") loadModelConfig();
 }
 
 document.querySelectorAll(".nav-item").forEach((b) =>
@@ -230,6 +238,9 @@ async function loadDocs() {
 
 $("kbSelect").addEventListener("change", (e) => {
     currentKb = e.target.value || null;
+    // 历史属于具体知识库：切换后必须清掉，否则上一库的问答会被当成上下文发给模型
+    ragHistory.length = 0;
+    $("ragChat").replaceChildren();
     applyKbPerms();
     loadDocs();
 });
@@ -261,12 +272,10 @@ $("btnUpload").onclick = async () => {
     const btn = $("btnUpload");
     btn.disabled = true; btn.textContent = "解析与向量化中…";
     try {
-        await fetch(`${API}/rag/knowledge-bases/${currentKb}/documents`, {
+        // 复用 api()：自动带 token、401 时统一登出、非 JSON 错误体也不会抛 SyntaxError
+        await api(`/rag/knowledge-bases/${currentKb}/documents`, {
             method: "POST",
-            headers: { Authorization: "Bearer " + currentToken() },
             body: fd,
-        }).then(async (r) => {
-            if (!r.ok) throw new Error((await r.json()).error?.message || "上传失败");
         });
         $("kbFiles").value = "";
         toast("上传并解析完成", "success");
@@ -308,7 +317,11 @@ async function askRag() {
         });
         waiting.remove();
         addBubble($("ragChat"), data.answer, "ai", renderCitations(data.citations));
-        ragHistory.push({ role: "user", content: question }, { role: "assistant", content: data.answer });
+        // 空回答不能入历史：后端要求 content 至少 1 个字符，
+        // 一旦存进去，本会话后续每次提问都会因校验失败而 422
+        if (data.answer) {
+            ragHistory.push({ role: "user", content: question }, { role: "assistant", content: data.answer });
+        }
     } catch (e) { if (waiting) waiting.textContent = "出错：" + e.message; }
 }
 $("btnAsk").onclick = askRag;
@@ -382,6 +395,11 @@ async function sendAgent() {
                     if (!answerBubble) answerBubble = addBubble(chat, "", "ai");
                     answerBubble.textContent += payload.content;
                     chat.scrollTop = chat.scrollHeight;
+                } else if (type === "streaming_fallback") {
+                    // 网关不支持 SSE，已降级为整段输出（功能不受影响，仅无打字机效果）
+                    if (payload.reason === "sse_unsupported") {
+                        addSystem(chat, "（该模型网关不支持逐字流式，已整段返回）");
+                    }
                 } else if (type === "error") {
                     addBubble(chat, "出错：" + payload.message, "ai");
                 }
@@ -405,9 +423,19 @@ $("agentMessage").addEventListener("keydown", (e) => e.key === "Enter" && sendAg
 $("imageFile").addEventListener("change", () => {
     const file = $("imageFile").files[0];
     const img = $("imagePreview");
+    // 释放上一个预览的对象 URL：不回收会让每次选图都留下一个常驻内存的 blob
+    if (img.dataset.objectUrl) {
+        URL.revokeObjectURL(img.dataset.objectUrl);
+        delete img.dataset.objectUrl;
+    }
     if (file) {
-        img.src = URL.createObjectURL(file);
+        const url = URL.createObjectURL(file);
+        img.dataset.objectUrl = url;
+        img.src = url;
         img.style.display = "block";
+    } else {
+        img.removeAttribute("src");
+        img.style.display = "none";
     }
 });
 
@@ -488,13 +516,19 @@ $("btnRunWf").onclick = async () => {
         $("wfOutputs").textContent = JSON.stringify(data.outputs, null, 2);
         const logs = $("wfLogs");
         logs.innerHTML = "";
+        // 后端状态取值：success / skipped / failed（见 workflow/engine.py）
+        const LOG_TEXT = { success: "完成", skipped: "跳过（分支未命中）", failed: "失败" };
         (data.logs || []).forEach((log) => {
             const div = document.createElement("div");
-            div.className = "log-line" + (log.status === "error" ? " error" : log.status === "ok" ? " ok" : "");
-            div.textContent = `[${log.node}] ${log.status}${log.elapsed_ms != null ? ` (${log.elapsed_ms}ms)` : ""}${log.error ? " — " + log.error : ""}`;
+            const cls = log.status === "failed" ? " error" : log.status === "success" ? " ok" : " muted";
+            div.className = "log-line" + cls;
+            div.textContent = `[${log.node}] ${LOG_TEXT[log.status] || log.status}`
+                + (log.elapsed_ms != null ? ` (${log.elapsed_ms}ms)` : "")
+                + (log.error ? " — " + log.error : "");
             logs.appendChild(div);
         });
-        toast(data.status === "ok" ? "工作流执行完成" : "工作流执行异常", data.status === "ok" ? "success" : "error");
+        const ok = data.status === "success" || data.status === "ok";
+        toast(ok ? "工作流执行完成" : "工作流执行异常", ok ? "success" : "error");
     } catch (e) { toast(e.message, "error"); }
     finally { btn.disabled = false; }
 };
@@ -548,6 +582,217 @@ $("btnAddUser").onclick = async () => {
         await loadUsers();
     } catch (e) { toast(e.message, "error"); }
 };
+
+// ============================================================
+// 模型接入
+// ============================================================
+let modelConfig = null;   // {catalog, effective, saved}
+
+function isAdmin() { return currentUser?.role === "admin"; }
+
+function providerMeta(key) {
+    return (modelConfig?.catalog || []).find((p) => p.key === key) || null;
+}
+
+function updateModelChip() {
+    const text = $("modelChipText");
+    const dot = $("modelChipDot");
+    if (!modelConfig) {
+        text.textContent = "模型未配置";
+        dot.className = "model-chip-dot warn";
+        return;
+    }
+    const e = modelConfig.effective;
+    text.textContent = `${e.provider_label || "沿用 .env"} · ${e.llm_model || "未指定模型"}`;
+    const meta = providerMeta(e.provider);
+    const usable = e.has_api_key || meta?.local || !e.provider;
+    dot.className = "model-chip-dot" + (usable ? " ok" : " warn");
+    $("modelChip").title = `提供商：${e.provider_label || "沿用 .env"}｜模型：${e.llm_model || "未指定"}｜端点：${e.base_url}`;
+}
+
+async function loadModelConfig() {
+    try {
+        modelConfig = await api("/models/config");
+        renderModelPanel();
+        updateModelChip();
+    } catch (e) {
+        $("modelChipText").textContent = "模型信息加载失败";
+        $("modelChipDot").className = "model-chip-dot warn";
+        $("mdCurrent").textContent = "加载失败：" + e.message;
+    }
+}
+
+function renderModelPanel() {
+    const catalog = modelConfig.catalog || [];
+    const sel = $("mdProvider");
+    // 重渲染时保留用户当前选中的提供商，否则回落到实际生效的那家
+    const keep = sel.value || modelConfig.effective.provider || catalog[0]?.key || "";
+    sel.innerHTML = "";
+    catalog.forEach((p) => {
+        const opt = document.createElement("option");
+        opt.value = p.key;
+        opt.textContent = p.label + (p.local ? " · 本地" : "");
+        sel.appendChild(opt);
+    });
+    sel.value = keep;
+    fillModelForm(keep);
+
+    const e = modelConfig.effective;
+    $("mdCurrent").innerHTML = [
+        ["提供商", e.provider_label || "未配置（沿用 .env）"],
+        ["Base URL", e.base_url || "—"],
+        ["对话模型", e.llm_model || "—"],
+        ["Embedding 模型", e.embedding_model || "—"],
+        ["Embedding 端点", e.embedding_base_url || "与 Base URL 相同"],
+        ["视觉模型", e.vision_model || "—"],
+        ["API Key", e.has_api_key ? "已配置 " + e.api_key_hint : "未配置"],
+    ].map(([k, v]) => `<div class="kv-row"><span>${escapeHtml(k)}</span><code>${escapeHtml(v)}</code></div>`).join("");
+
+    // 接入参数会影响所有用户，仅管理员可修改
+    const editable = isAdmin();
+    ["mdProvider", "mdBaseUrl", "mdApiKey", "mdModelSelect", "mdModel", "mdEmbedding",
+     "mdEmbeddingUrl", "mdVision", "btnFetchModels", "btnTestModel", "btnSaveModel", "btnResetModel"]
+        .forEach((id) => { const el = $(id); if (el) el.disabled = !editable; });
+    $("modelAdminHint").textContent = editable ? "" : "仅管理员可修改，以下为只读展示";
+}
+
+function fillModelForm(provider) {
+    const meta = providerMeta(provider);
+    const saved = modelConfig.saved?.[provider] || {};
+    $("mdBaseUrl").value = saved.base_url || meta?.default_base_url || modelConfig.effective.base_url || "";
+    $("mdApiKey").value = "";
+    $("mdEmbeddingUrl").value = saved.embedding_base_url || "";
+    fillModelOptions(meta?.models || []);
+
+    const chosen = saved.llm_model || meta?.default_model || "";
+    $("mdModel").value = chosen;
+    if (chosen) $("mdModelSelect").value = chosen;  // 不在列表内时 select 保持首项，以手填框为准
+    $("mdEmbedding").value = saved.embedding_model || meta?.default_embedding_model || "";
+    $("mdVision").value = saved.vision_model || meta?.default_vision_model || "";
+
+    $("mdProviderHint").textContent = meta
+        ? `${meta.label}｜${meta.supports_vision ? "支持图片理解" : "无视觉能力（图片理解会失败）"}`
+        : "";
+    const keyState = saved.has_api_key ? "已保存 Key"
+        : meta?.has_env_key ? "使用 .env 中的 Key"
+        : meta?.local ? "无需 Key" : "未配置 Key";
+    $("mdKeyHint").textContent = keyState + (meta?.local ? "（本地/自建服务可留空）" : "（留空保存不会清除已存 Key）");
+}
+
+function fillModelOptions(models) {
+    const ms = $("mdModelSelect");
+    ms.innerHTML = "";
+    if (!models.length) {
+        const opt = document.createElement("option");
+        opt.value = ""; opt.textContent = "（暂无列表，可点「拉取列表」或直接填写）";
+        ms.appendChild(opt);
+        return;
+    }
+    models.forEach((m) => {
+        const opt = document.createElement("option");
+        opt.value = m; opt.textContent = m;
+        ms.appendChild(opt);
+    });
+    const cur = $("mdModel").value.trim();
+    if (cur && models.includes(cur)) ms.value = cur;
+}
+
+function currentProfile() {
+    const typed = $("mdModel").value.trim();
+    return {
+        base_url: $("mdBaseUrl").value.trim(),
+        api_key: $("mdApiKey").value,   // 留空 = 不修改（由后端处理）
+        llm_model: typed || $("mdModelSelect").value || "",
+        embedding_model: $("mdEmbedding").value.trim(),
+        embedding_base_url: $("mdEmbeddingUrl").value.trim(),
+        vision_model: $("mdVision").value.trim(),
+    };
+}
+
+$("mdProvider").addEventListener("change", () => {
+    fillModelForm($("mdProvider").value);
+    $("mdStatus").textContent = "尚未测试";
+});
+
+// 显式从下拉列表选模型 = 以列表为准，同步到手填框
+$("mdModelSelect").addEventListener("change", () => {
+    if ($("mdModelSelect").value) $("mdModel").value = $("mdModelSelect").value;
+});
+
+$("btnFetchModels").onclick = async () => {
+    const btn = $("btnFetchModels");
+    btn.disabled = true;
+    $("mdStatus").textContent = "正在拉取模型列表…";
+    try {
+        const r = await api("/models/list", {
+            method: "POST",
+            body: JSON.stringify({ provider: $("mdProvider").value, profile: currentProfile() }),
+        });
+        fillModelOptions(r.models || []);
+        const note = r.source === "remote"
+            ? `已从服务端获取 ${r.models.length} 个模型`
+            : "未能连接服务端，已回退到建议列表";
+        $("mdStatus").textContent = (r.error ? "⚠️ " : "✅ ") + note + (r.error ? `（${r.error}）` : "");
+    } catch (e) {
+        $("mdStatus").textContent = "❌ " + e.message;
+    } finally { btn.disabled = false; }
+};
+
+$("btnTestModel").onclick = async () => {
+    const btn = $("btnTestModel");
+    btn.disabled = true;
+    $("mdStatus").textContent = "测试中…";
+    try {
+        const r = await api("/models/test", {
+            method: "POST",
+            body: JSON.stringify({ provider: $("mdProvider").value, profile: currentProfile() }),
+        });
+        if (r.models?.length) fillModelOptions(r.models);
+        $("mdStatus").textContent = (r.ok ? "✅ " : "❌ ") + r.detail;
+        toast(r.ok ? "连接正常" : "连接失败", r.ok ? "success" : "error");
+    } catch (e) {
+        $("mdStatus").textContent = "❌ " + e.message;
+        toast(e.message, "error");
+    } finally { btn.disabled = false; }
+};
+
+$("btnSaveModel").onclick = async () => {
+    const profile = currentProfile();
+    if (!profile.llm_model) return toast("请填写对话模型 ID", "error");
+    const btn = $("btnSaveModel");
+    btn.disabled = true;
+    try {
+        modelConfig = await api("/models/config", {
+            method: "POST",
+            body: JSON.stringify({ provider: $("mdProvider").value, profile }),
+        });
+        renderModelPanel();
+        updateModelChip();
+        $("mdStatus").textContent = "✅ 已保存并生效（无需重启）";
+        toast("模型配置已生效", "success");
+    } catch (e) {
+        $("mdStatus").textContent = "❌ 保存失败：" + e.message;
+        toast(e.message, "error");
+    } finally { btn.disabled = false; }
+};
+
+$("btnResetModel").onclick = async () => {
+    if (!confirm("恢复为 .env 中的模型配置？界面保存的接入参数（含 API Key）将被清除。")) return;
+    const btn = $("btnResetModel");
+    btn.disabled = true;
+    try {
+        modelConfig = await api("/models/config", { method: "DELETE" });
+        renderModelPanel();
+        updateModelChip();
+        $("mdStatus").textContent = "已恢复 .env 默认配置";
+        toast("已恢复默认配置", "success");
+    } catch (e) {
+        $("mdStatus").textContent = "❌ " + e.message;
+        toast(e.message, "error");
+    } finally { btn.disabled = false; }
+};
+
+$("modelChip").onclick = () => switchTab("models");
 
 // ============================================================
 // 修改密码

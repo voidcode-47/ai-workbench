@@ -87,11 +87,15 @@ def evaluate(kb_id: str, cases: list[dict], top_k: int) -> dict:
             }
         )
 
+    # hit_rate 的分子只在有 expected_doc_id 的用例上累加，分母必须同口径；
+    # 否则用例文件混用了有无 expected_doc_id 的两类用例时会系统性低估命中率
+    evaluable = sum(1 for c in cases if c.get("expected_doc_id"))
+
     return {
         "kb_id": kb_id,
         "cases": total,
         "top_k": top_k,
-        "hit_rate": round(hits / total, 4) if total and any(c.get("expected_doc_id") for c in cases) else None,
+        "hit_rate": round(hits / evaluable, 4) if evaluable else None,
         "mrr": round(sum(reciprocal_ranks) / len(reciprocal_ranks), 4) if reciprocal_ranks else None,
         "keyword_recall": round(sum(keyword_recalls) / len(keyword_recalls), 4) if keyword_recalls else None,
         "context_precision": round(sum(precisions) / len(precisions), 4) if precisions else None,

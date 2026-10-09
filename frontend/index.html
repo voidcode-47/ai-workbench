@@ -22,7 +22,7 @@
             <label class="field-label" for="loginPass">密码</label>
             <input id="loginPass" class="input" type="password" placeholder="请输入密码">
             <div id="loginError" class="form-error"></div>
-            <button type="submit" class="btn primary block" id="btnLogin">登 录</button>
+            <button type="submit" class="btn primary block" id="btnLogin">登录</button>
         </form>
     </div>
 </div>
@@ -39,6 +39,7 @@
             <button class="nav-item" data-tab="agent">智能助手</button>
             <button class="nav-item" data-tab="multimodal">图片理解</button>
             <button class="nav-item" data-tab="workflow">工作流</button>
+            <button class="nav-item" data-tab="models">模型接入</button>
             <button class="nav-item" data-tab="users" id="navUsers" hidden>用户管理</button>
         </nav>
         <div class="sidebar-footer">
@@ -56,10 +57,14 @@
     <div class="main">
         <header class="topbar">
             <h2 id="pageTitle">知识库</h2>
+            <button class="model-chip" id="modelChip" title="点击查看 / 切换模型接入">
+                <span class="model-chip-dot" id="modelChipDot"></span>
+                <span class="model-chip-text" id="modelChipText">模型加载中…</span>
+            </button>
         </header>
 
         <main class="content">
-            <!-- ========== RAG ========== -->
+            <!-- ========== RAG 知识库 ========== -->
             <section class="panel active" id="panel-rag">
                 <div class="grid two-col">
                     <div class="card">
@@ -95,11 +100,12 @@
                 </div>
             </section>
 
-            <!-- ========== Agent ========== -->
+            <!-- ========== Agent 智能助手 ========== -->
             <section class="panel" id="panel-agent">
                 <div class="card">
                     <div class="card-head">
-                        <h3>智能助手 <span class="hint" id="toolListHint"></span></h3>
+                        <h3>智能助手</h3>
+                        <span class="hint" id="toolListHint"></span>
                     </div>
                     <div id="agentChat" class="chat-box tall"></div>
                     <div class="form-row">
@@ -109,7 +115,7 @@
                 </div>
             </section>
 
-            <!-- ========== Multimodal ========== -->
+            <!-- ========== Multimodal 图片理解 ========== -->
             <section class="panel" id="panel-multimodal">
                 <div class="grid two-col">
                     <div class="card">
@@ -133,7 +139,7 @@
                 </div>
             </section>
 
-            <!-- ========== Workflow ========== -->
+            <!-- ========== Workflow 工作流 ========== -->
             <section class="panel" id="panel-workflow">
                 <div class="grid two-col">
                     <div class="card">
@@ -157,7 +163,63 @@
                 </div>
             </section>
 
-            <!-- ========== Users（管理员） ========== -->
+            <!-- ========== Models 模型接入 ========== -->
+            <section class="panel" id="panel-models">
+                <div class="grid two-col">
+                    <div class="card">
+                        <div class="card-head">
+                            <h3>模型接入配置</h3>
+                            <span class="hint" id="modelAdminHint"></span>
+                        </div>
+                        <label class="field-label" for="mdProvider">提供商</label>
+                        <select id="mdProvider" class="input"></select>
+                        <div class="hint" id="mdProviderHint"></div>
+
+                        <label class="field-label" for="mdBaseUrl">Base URL（OpenAI 兼容端点）</label>
+                        <input id="mdBaseUrl" class="input" placeholder="http://127.0.0.1:1234/v1" spellcheck="false">
+
+                        <label class="field-label" for="mdApiKey">API Key</label>
+                        <input id="mdApiKey" class="input" type="password" spellcheck="false"
+                               placeholder="留空表示不修改已保存的 Key">
+                        <div class="hint" id="mdKeyHint"></div>
+
+                        <label class="field-label" for="mdModel">对话模型 ID</label>
+                        <div class="form-row">
+                            <select id="mdModelSelect" class="input"></select>
+                            <button class="btn ghost" id="btnFetchModels">拉取列表</button>
+                        </div>
+                        <input id="mdModel" class="input" spellcheck="false"
+                               placeholder="也可直接输入模型 ID，如 qwen2.5-7b">
+
+                        <label class="field-label" for="mdEmbedding">Embedding 模型（知识库向量化）</label>
+                        <input id="mdEmbedding" class="input" spellcheck="false">
+                        <label class="field-label" for="mdEmbeddingUrl">Embedding 独立端点（可选，留空与 Base URL 相同）</label>
+                        <input id="mdEmbeddingUrl" class="input" spellcheck="false">
+
+                        <label class="field-label" for="mdVision">视觉模型（图片理解）</label>
+                        <input id="mdVision" class="input" spellcheck="false">
+
+                        <div class="form-row">
+                            <button class="btn" id="btnTestModel">测试连接</button>
+                            <button class="btn primary" id="btnSaveModel">保存并生效</button>
+                            <button class="btn danger" id="btnResetModel">恢复默认</button>
+                        </div>
+                        <div id="mdStatus" class="result-box small">尚未测试</div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-head"><h3>当前生效</h3></div>
+                        <div id="mdCurrent" class="result-box compact">加载中…</div>
+                        <div class="notice">
+                            <p>保存后立即生效，无需重启服务。</p>
+                            <p>更换 <strong>Embedding 模型</strong> 会改变向量维度，已有知识库需要到「知识库」页逐一执行<strong>重建索引</strong>。</p>
+                            <p>连接信息保存在 <code>data/model_config.json</code>；点「恢复默认」回到 <code>.env</code> 的配置。</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ========== Users 用户管理 ========== -->
             <section class="panel" id="panel-users">
                 <div class="card">
                     <div class="card-head">

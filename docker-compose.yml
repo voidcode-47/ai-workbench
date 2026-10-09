@@ -3,7 +3,8 @@ services:
     build: .
     container_name: ai-workbench
     ports:
-      # 默认仅本机可访问；如需对外提供服务，改为 "8000:8000" 并务必设置 API_KEY
+      # 默认仅本机可访问；如需对外提供服务，改为 "8000:8000"
+      # 并务必修改默认管理员密码（ADMIN_PASSWORD）、保持 CORS 白名单留空或精确配置
       - "127.0.0.1:8000:8000"
     env_file:
       - .env

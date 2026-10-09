@@ -9,9 +9,12 @@ import hashlib
 import logging
 import math
 import re
+import threading
 
 from app.config import Settings
 from app.exceptions import EmbeddingError
+# 公开托管服务主机名单与 model_config 共用，避免两处漂移
+from app.model_config import is_public_host
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +39,9 @@ class OpenAIEmbedder(BaseEmbedder):
         from openai import OpenAI
 
         self._client = OpenAI(
-            api_key=settings.openai_api_key,
+            # openai SDK ≥1.x 对空字符串直接抛 Missing credentials；
+            # 本地/自建兼容端点不需要真 Key，用占位值（与 LLM 客户端一致）
+            api_key=settings.openai_api_key or "sk-no-key-required",
             # Embedding 支持独立端点（如本地 LM Studio），未配置时与 LLM 同端点
             base_url=settings.embedding_base_url or settings.openai_base_url,
             timeout=60,
@@ -82,11 +87,66 @@ class LocalHashEmbedder(BaseEmbedder):
 
 
 _embedder: BaseEmbedder | None = None
+_embedder_lock = threading.Lock()
+
+
+def _use_remote_endpoint(settings: Settings) -> bool:
+    """是否应调用远端 Embedding 接口。
+
+    有 API Key 时走远端；没有 Key 但端点不是公开托管服务（如 LM Studio、
+    vLLM、One-API 等本地/自建兼容网关）时同样走远端 —— 否则本地部署会被
+    静默降级成语义无关的哈希向量，检索质量无从谈起。
+    """
+    if settings.openai_api_key:
+        return True
+    base = settings.embedding_base_url or settings.openai_base_url or ""
+    if not base:
+        return False
+    return not is_public_host(base)
+
+
+def _build_embedder(settings: Settings) -> BaseEmbedder:
+    return OpenAIEmbedder(settings) if _use_remote_endpoint(settings) else LocalHashEmbedder()
 
 
 def get_embedder(settings: Settings) -> BaseEmbedder:
     """单例 Embedder（pydantic Settings 不可哈希，不能直接用 lru_cache）。"""
     global _embedder
     if _embedder is None:
-        _embedder = OpenAIEmbedder(settings) if settings.openai_api_key else LocalHashEmbedder()
+        with _embedder_lock:
+            if _embedder is None:
+                _embedder = _build_embedder(settings)
     return _embedder
+
+
+def reset_embedder() -> None:
+    """丢弃单例，使下次调用按当前配置重建（切换 Embedding 模型/端点后调用）。"""
+    global _embedder
+    with _embedder_lock:
+        _embedder = None
+
+
+class EmbedderHandle(BaseEmbedder):
+    """稳定句柄：每次调用都转发到当前生效的 Embedding 实现。
+
+    RAGService 在构造时持有本句柄，因此切换 Embedding 模型后无需重建
+    RAGService —— 重建会连带丢弃向量库的内存缓存。
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+
+    @property
+    def dim(self) -> int:
+        return get_embedder(self._settings).dim
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return get_embedder(self._settings).embed_documents(texts)
+
+    def embed_query(self, text: str) -> list[float]:
+        return get_embedder(self._settings).embed_query(text)
+
+
+def get_embedder_handle(settings: Settings) -> BaseEmbedder:
+    """返回转发句柄（供长生命周期对象持有）。"""
+    return EmbedderHandle(settings)

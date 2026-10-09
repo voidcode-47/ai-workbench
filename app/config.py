@@ -17,7 +17,6 @@ class Settings(BaseSettings):
 
     # 应用
     app_name: str = "AI Workbench"
-    api_key: str = ""
     # 初始管理员（首次启动自动创建；登录后请在个人设置中修改密码）
     admin_username: str = "admin"
     admin_password: str = "admin123"

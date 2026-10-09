@@ -46,13 +46,24 @@ if settings.cors_origins:
 # ---------- 限流中间件（内存滑动窗口） ----------
 rate_limiter = InMemoryRateLimiter()
 
+# 登录接口单独收紧：该接口无需鉴权，是口令爆破的主要目标
+_LOGIN_RATE_LIMIT = 10
+
 
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
     if settings.enable_rate_limit and request.url.path.startswith("/api/"):
         client = request.client.host if request.client else "anonymous"
-        identity = request.headers.get("authorization") or client
-        if not rate_limiter.allow(identity, settings.rate_limit_per_minute):
+        # 限流 key 只认客户端 IP。Authorization 头由请求方完全控制，
+        # 用它当 key 等于每次请求都换一个新桶，限流形同虚设（登录爆破不受限）。
+        #
+        # 登录用独立命名空间：否则登录与其它接口共用一个计数器，
+        # 常态调用会把登录配额耗尽（10 次登录其实变成"总计 10 次 API 调用"）。
+        if request.url.path.endswith("/auth/login"):
+            allowed = rate_limiter.allow(f"login:{client}", _LOGIN_RATE_LIMIT)
+        else:
+            allowed = rate_limiter.allow(client, settings.rate_limit_per_minute)
+        if not allowed:
             return JSONResponse(
                 status_code=429,
                 content={"error": {"code": "RATE_LIMITED", "message": "请求过于频繁，请稍后再试"}},
@@ -67,6 +78,11 @@ register_exception_handlers(app)
 from app.auth import init_auth_db  # noqa: E402
 
 init_auth_db()
+
+# 应用界面保存的模型接入配置（不存在时保持 .env 默认值），使重启后模型选择延续
+from app.model_config import apply_runtime_config  # noqa: E402
+
+apply_runtime_config()
 
 app.include_router(api_router, prefix="/api/v1")
 

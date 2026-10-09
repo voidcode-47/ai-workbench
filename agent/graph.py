@@ -23,8 +23,7 @@ AGENT_SYSTEM_PROMPT = """你是一个工具增强型 AI 助手，通过"推理 -
 5. 同一工具连续失败 2 次应换方案或向用户说明原因，不要死循环。"""
 
 
-def build_agent_graph(settings: Settings):
-    """编译并返回 LangGraph 可执行图。"""
+def _make_llm(settings: Settings, *, streaming: bool):
     from langchain_openai import ChatOpenAI
 
     tools = get_tools(settings)
@@ -34,13 +33,76 @@ def build_agent_graph(settings: Settings):
         base_url=settings.openai_base_url,
         temperature=0.2,
         timeout=60,
+        streaming=streaming,
     )
     llm_with_tools = llm.bind_tools(tools)
+    return tools, llm_with_tools
+
+
+def build_agent_graph(settings: Settings):
+    """编译并返回 LangGraph 可执行图。
+
+    - 非流式路径（fallback）：agent 节点一次 invoke 出完整 AIMessage，
+      用于网关不支持 SSE 时的降级路径，也用于旧的 /chat 接口。
+    - 逐 token 流式路径（streaming）：agent 节点用 astream 分块产出，
+      供 /chat/stream 打字机效果使用。
+    """
+    from langchain_core.messages import SystemMessage
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.prebuilt import ToolNode, tools_condition
+
+    graph = _build_graph(settings, streaming=False)
+    logger.info("Agent 非流式状态图构建完成")
+    return graph
+
+
+def build_agent_graph_streaming(settings: Settings):
+    """编译逐 token 流式的 Agent 图。
+
+    agent 节点通过 `astream` 逐 AIMessageChunk 产出，
+    LangGraph `stream_mode="messages"` 会把每个 chunk 推给调用者。
+    若该网关/模型不支持 SSE，首次调用会抛错，由 executor 捕获后
+    降级到 build_agent_graph 的 fallback 路径。
+    """
+    graph = _build_graph(settings, streaming=True)
+    logger.info("Agent 流式状态图构建完成")
+    return graph
+
+
+def _build_graph(settings: Settings, *, streaming: bool):
+    from langchain_core.messages import SystemMessage
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.prebuilt import ToolNode, tools_condition
+
+    tools, llm_with_tools = _make_llm(settings, streaming=streaming)
     system_message = SystemMessage(content=AGENT_SYSTEM_PROMPT)
 
-    def agent_node(state: AgentState) -> dict:
-        response = llm_with_tools.invoke([system_message, *state["messages"]])
-        return {"messages": [response]}
+    if streaming:
+
+        async def agent_node(state: AgentState):
+            """逐 token 流式推理节点。
+
+            `astream` 产出的是 AIMessageChunk（增量）。若网关不支持
+            streaming 会抛 OpenAIError/LLMError，由 executor 层统一降级。
+            """
+            chunks = []
+            async for chunk in llm_with_tools.astream([system_message, *state["messages"]]):
+                if chunk.content:
+                    chunks.append(chunk)
+            # 把增量 chunk 合并成单个 AIMessage，保留 tool_calls
+            if not chunks:
+                from langchain_core.messages import AIMessage
+                return {"messages": [AIMessage(content="")]}
+            merged = chunks[0]
+            for extra in chunks[1:]:
+                merged = merged + extra
+            return {"messages": [merged]}
+
+    else:
+
+        def agent_node(state: AgentState) -> dict:
+            response = llm_with_tools.invoke([system_message, *state["messages"]])
+            return {"messages": [response]}
 
     graph = StateGraph(AgentState)
     graph.add_node("agent", agent_node)
@@ -50,5 +112,5 @@ def build_agent_graph(settings: Settings):
     graph.add_conditional_edges("agent", tools_condition, {"tools": "tools", END: END})
     graph.add_edge("tools", "agent")
 
-    logger.info("Agent 状态图构建完成，工具数=%d", len(tools))
+    logger.info("Agent 状态图构建完成，streaming=%s，工具数=%d", streaming, len(tools))
     return graph.compile()

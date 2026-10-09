@@ -16,6 +16,7 @@ from app.auth import (
     create_token,
     create_user,
     delete_user,
+    ensure_user_deletable,
     kb_delete_meta,
     kb_get_meta,
     list_users,
@@ -28,7 +29,11 @@ router = APIRouter(tags=["Auth"])
 @router.post("/auth/login", response_model=LoginResponse)
 def login(payload: LoginRequest):
     user = authenticate(payload.username, payload.password)
-    token = create_token(user["username"], user["role"])
+    token = create_token(
+        user["username"],
+        user["role"],
+        user.get("token_version", 0),
+    )
     return LoginResponse(token=token, username=user["username"], role=user["role"])
 
 
@@ -56,6 +61,10 @@ def add_user(payload: UserCreateRequest, _: dict = Depends(require_admin)):
 
 @router.delete("/users/{username}", response_model=UserInfo)
 def remove_user(username: str, _: dict = Depends(require_admin)):
+    # 先做前置校验（不写入任何数据）：管理员账号不允许删除。
+    # 否则会先级联删掉该管理员名下的知识库，再报错，造成数据丢失。
+    ensure_user_deletable(username)
+
     # 级联删除该员工名下的全部知识库（向量数据 + 元数据），随账号一并清除
     service = get_rag_service()
     for kb in service.list_knowledge_bases():

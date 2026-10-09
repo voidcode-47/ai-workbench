@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -30,17 +31,21 @@ class NodeServices:
     rag_service: Any
     agent_executor: Any
 
-    def chat(self, prompt: str, system: str | None = None) -> str:
+    def chat(self, prompt: str, system: str | None = None, timeout: float | None = None) -> str:
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
         client = get_openai_client()
-        response = client.chat.completions.create(
-            model=self.settings.llm_model,
-            messages=messages,
-            temperature=0.3,
-        )
+        # 显式传超时：否则一台卡住的端点会让单个节点远超工作流整体预算
+        kwargs: dict = {
+            "model": self.settings.llm_model,
+            "messages": messages,
+            "temperature": 0.3,
+        }
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        response = client.chat.completions.create(**kwargs)
         return response.choices[0].message.content or ""
 
 
@@ -86,8 +91,21 @@ def run_node(node: dict, context: dict, services: NodeServices) -> tuple[Any, di
 def _input_node(config: dict, context: dict, services: NodeServices) -> tuple[Any, dict]:
     fields = config.get("fields")
     inputs = context.get("__inputs__", {})
-    output = {k: inputs[k] for k in fields if k in inputs} if fields else dict(inputs)
+    if fields is None:
+        # 未声明 fields = 暴露全部输入
+        output = dict(inputs)
+    else:
+        # 显式空列表 = 不暴露任何输入（不能与"未声明"混为一谈）
+        output = {k: inputs[k] for k in fields if k in inputs}
     return output, {"fields": list(output)}
+
+
+def _remaining_timeout(context: dict) -> float | None:
+    """按工作流整体截止时间算出本节点可用的剩余秒数。"""
+    deadline = context.get("__deadline__")
+    if not isinstance(deadline, (int, float)):
+        return None
+    return max(1.0, float(deadline) - time.time())
 
 
 def _llm_node(config: dict, context: dict, services: NodeServices) -> tuple[Any, dict]:
@@ -97,7 +115,7 @@ def _llm_node(config: dict, context: dict, services: NodeServices) -> tuple[Any,
     system = config.get(
         "system", "你是一个专业的 AI 工作流处理节点，请严格依据输入完成任务，使用简体中文。"
     )
-    result = services.chat(prompt, system)
+    result = services.chat(prompt, system, timeout=_remaining_timeout(context))
     return result, {"model": services.settings.llm_model, "chars": len(result)}
 
 
@@ -106,6 +124,17 @@ def _retrieval_node(config: dict, context: dict, services: NodeServices) -> tupl
     question = config.get("question")
     if not kb_id or not question:
         raise ValueError("retrieval 节点缺少 config.kb_id 或 config.question")
+
+    # 工作流定义由调用方完全掌控，这里不校验权限就等于绕过知识库 ACL：
+    # 任何登录用户都能用一个 retrieval 节点读出他人私有库的内容
+    user = context.get("__user__")
+    if user is not None:
+        from app.auth import kb_access_level
+        from app.exceptions import ForbiddenError
+
+        if kb_access_level(kb_id, user) == "none":
+            raise ForbiddenError("知识库不存在或无权访问")
+
     records = services.rag_service.retrieve(kb_id, question, top_k=config.get("top_k"))
     if not records:
         return "", {"hits": 0}
@@ -157,10 +186,11 @@ def _condition_node(config: dict, context: dict, services: NodeServices) -> tupl
 
 def _output_node(config: dict, context: dict, services: NodeServices) -> tuple[Any, dict]:
     fields = config.get("fields")
-    if fields:
+    if fields is not None:
+        # 显式空 dict = 输出空结果（不能与"未声明"混为一谈）
         output = {name: _resolve(ref, context) for name, ref in fields.items()}
     else:
-        # 默认收集所有直接上游节点的输出
+        # 未声明 fields：收集所有执行成功的节点输出
         output = {
             nid: data.get("output")
             for nid, data in context.items()

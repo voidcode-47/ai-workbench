@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from rag.vector_store import LocalVectorStore, VectorRecord
+from app.exceptions import DimensionMismatchError
 
 
 def _record(rid: str, doc_id: str, vector: list[float], text: str | None = None) -> VectorRecord:
@@ -69,8 +70,15 @@ class TestAddAndSearch:
     def test_embedding_dimension_mismatch_is_rejected(self, store):
         store.create_collection("kb")
         store.add("kb", [_record("a:0", "a", [1.0, 0.0])])
-        with pytest.raises(ValueError, match="维度"):
+        with pytest.raises(DimensionMismatchError, match="维度"):
             store.add("kb", [_record("b:0", "b", [1.0, 0.0, 0.0])])
+
+    def test_search_dimension_mismatch_gives_actionable_error(self, store):
+        """换过 Embedding 模型却没重建索引时，检索应给出可操作提示而非 numpy 形状错误。"""
+        store.create_collection("kb")
+        store.add("kb", [_record("a:0", "a", [1.0, 0.0])])
+        with pytest.raises(DimensionMismatchError, match="重建索引"):
+            store.search("kb", [1.0, 0.0, 0.0], top_k=1)
 
     def test_search_with_doc_id_filter_scans_behind_top_ranks(self, store):
         # 目标文档的片段分数排名靠后（top_k 之外）时，

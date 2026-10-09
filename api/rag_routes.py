@@ -19,7 +19,7 @@ from api.schemas import (
     QueryRequest,
     QueryResponse,
 )
-from app.auth import kb_delete_meta, kb_get_meta, kb_list_meta, kb_set_meta
+from app.auth import kb_access_level, kb_delete_meta, kb_get_meta, kb_list_meta, kb_set_meta
 from app.config import get_settings
 from app.dependencies import get_chat_chain, get_rag_service, require_user
 from app.exceptions import FileParseError, ForbiddenError
@@ -39,18 +39,9 @@ def _safe_filename(filename: str) -> str:
 def _kb_access(kb_id: str, user: dict) -> str:
     """返回知识库对当前用户的访问级别：owner（可读写）/ readonly / none（不可见）。
 
-    员工私有库对管理员同样不可见；历史知识库（无元数据）视为 admin 系统库。
+    规则集中在 app.auth.kb_access_level，与工作流节点的校验共用同一份。
     """
-    meta = kb_get_meta(kb_id)
-    owner = (meta or {}).get("owner") or "admin"  # 历史知识库无元数据，视为 admin 系统库
-    if owner == user["username"]:
-        return "owner"
-    if user["role"] == "admin":
-        # 管理员仅对自己名下的系统库有权限，员工私有库不可见
-        return "owner" if owner == "admin" else "none"
-    if owner == "admin":
-        return "readonly"
-    return "none"
+    return kb_access_level(kb_id, user)
 
 
 def _require_write(kb_id: str, user: dict) -> None:
@@ -66,6 +57,17 @@ def _require_read(kb_id: str, user: dict) -> None:
 @router.post("/knowledge-bases", response_model=KBResponse, tags=["RAG"])
 def create_knowledge_base(payload: KBCreateRequest, user: dict = Depends(require_user)):
     service = get_rag_service()
+    existing = kb_get_meta(payload.kb_id)
+    known_ids = {item["kb_id"] for item in service.list_knowledge_bases()}
+
+    if existing is not None or payload.kb_id in known_ids:
+        # 已存在的知识库只允许属主"重复创建"（幂等）。
+        # kb_set_meta 是 INSERT OR REPLACE，若不校验，任何登录用户都能靠
+        # POST 一个已知 kb_id 把 owner 改写成自己，从而夺走并删除别人的库。
+        existing_owner = (existing or {}).get("owner") or "admin"
+        if existing_owner != user["username"]:
+            raise ForbiddenError("该知识库已存在，且不属于当前用户")
+
     service.create_knowledge_base(payload.kb_id)
     kb_set_meta(payload.kb_id, payload.name, user["username"])
     return KBResponse(
@@ -161,7 +163,13 @@ async def upload_documents(
             stored_path.unlink(missing_ok=True)
             raise FileParseError(f"文件为空: {filename}")
 
-        info = service.ingest_file(stored_path, kb_id, doc_id=doc_id, filename=filename)
+        try:
+            info = service.ingest_file(stored_path, kb_id, doc_id=doc_id, filename=filename)
+        except Exception:
+            # 解析/向量化失败时清掉已落盘的源文件：
+            # 否则 data/files 会不断累积既不在文档列表里、也无法从界面删除的无主文件
+            stored_path.unlink(missing_ok=True)
+            raise
         results.append(
             DocumentResponse(
                 doc_id=info["doc_id"],

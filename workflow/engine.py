@@ -60,14 +60,16 @@ class WorkflowEngine:
         inputs: dict,
         runner: Callable[[dict, dict], tuple[Any, dict]],
         timeout: float | None = None,
+        user: dict | None = None,
     ) -> dict:
         """按拓扑顺序执行；runner(node, context) -> (output, meta)，返回执行上下文与日志。
 
         timeout：整体执行超时（秒），在节点之间检查，防止慢节点串行拖垮服务。
+        user：当前登录用户，放入上下文供需要鉴权的节点（如 retrieval）使用。
         """
         nodes_by_id = parsed["nodes_by_id"]
         adjacency = parsed["adjacency"]
-        context: dict[str, dict] = {"__inputs__": inputs}
+        context: dict[str, dict] = {"__inputs__": inputs, "__user__": user}
         logs: list[dict] = []
         active: set[str] = set(parsed["entry_nodes"])
         workflow_start = time.time()
@@ -81,6 +83,10 @@ class WorkflowEngine:
                 continue
 
             started = time.time()
+            if timeout:
+                # 把整体截止时间放进上下文：节点内部（如 LLM 调用）据此设置
+                # 自己的请求超时，避免单个慢节点远超整体预算
+                context["__deadline__"] = workflow_start + timeout
             try:
                 output, meta = runner(node, context)
             except Exception as exc:

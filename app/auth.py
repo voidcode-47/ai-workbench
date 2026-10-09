@@ -69,8 +69,15 @@ def init_auth_db() -> None:
                 " password_hash TEXT NOT NULL,"
                 " salt TEXT NOT NULL,"
                 " role TEXT NOT NULL DEFAULT 'employee',"
+                " token_version INTEGER NOT NULL DEFAULT 0,"
                 " created_at TEXT)"
             )
+            # 迁移旧库：token_version 用于让已签发的 token 在改密/删号后立即失效
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+            if "token_version" not in cols:
+                conn.execute(
+                    "ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0"
+                )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS kb_meta ("
                 " kb_id TEXT PRIMARY KEY,"
@@ -112,23 +119,49 @@ def _verify_password(password: str, password_hash: str, salt: str) -> bool:
 
 
 # ---------- Token ----------
+_token_lock = threading.Lock()
+
+
 def _token_secret() -> bytes:
     path = Path(get_settings().data_dir) / "secret.key"
     if path.exists():
         return path.read_bytes()
-    key = secrets.token_bytes(32)
-    path.write_bytes(key)
-    return key
+    with _token_lock:
+        # 双检：并发冷启动下两个请求可能同时生成不同的 Key，
+        # 后者覆盖前者会让先签发的 token 全部失效
+        if path.exists():
+            return path.read_bytes()
+        key = secrets.token_bytes(32)
+        path.write_bytes(key)
+        try:
+            path.chmod(0o600)  # 签名密钥只允许属主读取
+        except OSError:
+            pass
+        return key
 
 
-def create_token(username: str, role: str, ttl: int = _TOKEN_TTL_SECONDS) -> str:
-    payload = json.dumps({"u": username, "r": role, "exp": int(time.time()) + ttl}).encode()
+def create_token(
+    username: str,
+    role: str,
+    token_version: int = 0,
+    ttl: int = _TOKEN_TTL_SECONDS,
+) -> str:
+    payload = json.dumps({
+        "u": username,
+        "r": role,
+        "tv": int(token_version),
+        "exp": int(time.time()) + ttl,
+    }).encode()
     sig = hmac.new(_token_secret(), payload, hashlib.sha256).hexdigest()
     return base64.urlsafe_b64encode(payload).decode() + "." + sig
 
 
 def verify_token(token: str) -> dict | None:
-    """校验 token，成功返回 {"username","role"}，失败返回 None。"""
+    """校验 token 签名与有效期，成功返回 {"username","role","token_version"}。
+
+    注意：本函数只验签，不知道用户是否仍然存在、是否已改密。
+    鉴权入口必须再比对数据库中的 token_version（见 require_user）。
+    """
     try:
         payload_b64, sig = token.split(".")
         payload = base64.urlsafe_b64decode(payload_b64.encode())
@@ -138,7 +171,11 @@ def verify_token(token: str) -> dict | None:
         data = json.loads(payload)
         if data.get("exp", 0) < time.time():
             return None
-        return {"username": data["u"], "role": data["r"]}
+        return {
+            "username": data["u"],
+            "role": data["r"],
+            "token_version": int(data.get("tv", 0)),
+        }
     except Exception:
         return None
 
@@ -151,9 +188,35 @@ def authenticate(username: str, password: str) -> dict:
             row = conn.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
         finally:
             conn.close()
-    if row is None or not _verify_password(password, row["password_hash"], row["salt"]):
+    if row is None:
+        # 用户名不存在时也做一次等价的 PBKDF2 运算，
+        # 否则"秒回"与"约 100ms"的时间差会暴露用户名是否存在
+        _hash_password(password)
         raise InvalidCredentialsError("用户名或密码错误")
-    return {"username": row["username"], "role": row["role"]}
+    if not _verify_password(password, row["password_hash"], row["salt"]):
+        raise InvalidCredentialsError("用户名或密码错误")
+    return {
+        "username": row["username"],
+        "role": row["role"],
+        "token_version": row["token_version"],
+    }
+
+
+def get_user(username: str) -> dict | None:
+    """按用户名读取账号（含 token_version），不存在返回 None。"""
+    with _DB_LOCK:
+        conn = _connect()
+        try:
+            row = conn.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+        finally:
+            conn.close()
+    if row is None:
+        return None
+    return {
+        "username": row["username"],
+        "role": row["role"],
+        "token_version": row["token_version"],
+    }
 
 
 def create_user(username: str, password: str, role: str = "employee") -> dict:
@@ -190,6 +253,27 @@ def list_users() -> list[dict]:
         finally:
             conn.close()
     return [{"username": r["username"], "role": r["role"], "created_at": r["created_at"]} for r in rows]
+
+
+def ensure_user_deletable(username: str) -> str:
+    """校验用户可被删除并返回其角色，不可删除时抛异常（不写入任何数据）。
+
+    供路由在级联清理知识库之前做前置校验：删除操作本身会连带清空 kb_meta，
+    若先级联清理再报错，会把无权删除的管理员名下知识库误删。
+    """
+    if username == get_settings().admin_username:
+        raise AppError("不能删除管理员账号")
+    with _DB_LOCK:
+        conn = _connect()
+        try:
+            row = conn.execute("SELECT role FROM users WHERE username=?", (username,)).fetchone()
+        finally:
+            conn.close()
+    if row is None:
+        raise UserNotFoundError("用户不存在")
+    if row["role"] == "admin":
+        raise AppError("不能删除管理员账号")
+    return row["role"]
 
 
 def delete_user(username: str) -> dict:
@@ -229,8 +313,10 @@ def change_password(username: str, old_password: str, new_password: str) -> None
             if not _verify_password(old_password, row["password_hash"], row["salt"]):
                 raise InvalidCredentialsError("原密码错误")
             digest, salt = _hash_password(new_password)
+            # 递增 token_version：改密后旧的（含被盗的）token 立即失效
             conn.execute(
-                "UPDATE users SET password_hash=?, salt=? WHERE username=?",
+                "UPDATE users SET password_hash=?, salt=?, token_version=token_version+1"
+                " WHERE username=?",
                 (digest, salt, username),
             )
             conn.commit()
@@ -280,3 +366,25 @@ def kb_delete_meta(kb_id: str) -> None:
             conn.commit()
         finally:
             conn.close()
+
+
+def kb_access_level(kb_id: str, user: dict) -> str:
+    """返回知识库对当前用户的访问级别：owner（可读写）/ readonly / none（不可见）。
+
+    权限矩阵：
+    - 属主本人：owner；
+    - admin：对 owner=admin 的系统库为 owner，对员工私有库不可见；
+    - 普通员工：对 admin 系统库只读，对他人私有库不可见；
+    - 历史知识库（无元数据）视为 admin 系统库。
+
+    集中在 auth 层，供 RAG 路由与工作流节点共用，避免两处规则漂移。
+    """
+    meta = kb_get_meta(kb_id)
+    owner = (meta or {}).get("owner") or "admin"
+    if owner == user["username"]:
+        return "owner"
+    if user.get("role") == "admin":
+        return "owner" if owner == "admin" else "none"
+    if owner == "admin":
+        return "readonly"
+    return "none"

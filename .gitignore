@@ -15,6 +15,11 @@ data/vector_db/*
 !data/vector_db/.gitkeep
 data/*.db
 data/secret.key
+# 界面保存的模型接入配置（含 API Key）
+data/model_config.json
+
+# E2E 测试运行时数据（含测试库与临时 secret.key）
+data_e2e/
 
 # 测试 / IDE / 系统
 .pytest_cache/

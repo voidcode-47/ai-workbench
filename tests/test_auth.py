@@ -60,9 +60,12 @@ class TestPasswordHashing:
 
 class TestToken:
     def test_create_and_verify_roundtrip(self, auth_env):
-        token = create_token("alice", "employee")
+        token = create_token("alice", "employee", token_version=3)
         payload = verify_token(token)
-        assert payload == {"username": "alice", "role": "employee"}
+        assert payload == {"username": "alice", "role": "employee", "token_version": 3}
+
+    def test_token_version_defaults_to_zero(self, auth_env):
+        assert verify_token(create_token("alice", "employee"))["token_version"] == 0
 
     def test_expired_token_is_rejected(self, auth_env):
         token = create_token("alice", "employee", ttl=-10)
@@ -83,7 +86,25 @@ class TestToken:
 class TestUserCRUD:
     def test_init_creates_admin_and_authenticate_succeeds(self, auth_env):
         init_auth_db()
-        assert authenticate("admin", "admin123") == {"username": "admin", "role": "admin"}
+        user = authenticate("admin", "admin123")
+        assert user["username"] == "admin"
+        assert user["role"] == "admin"
+        assert user["token_version"] == 0
+
+    def test_change_password_bumps_token_version(self, auth_env):
+        """改密必须递增 token_version，否则旧的（含被盗的）token 仍然有效。"""
+        init_auth_db()
+        create_user("alice", "old-pass-1")
+        before = auth.get_user("alice")["token_version"]
+
+        change_password("alice", "old-pass-1", "new-pass-2")
+
+        assert auth.get_user("alice")["token_version"] == before + 1
+
+    def test_get_user_returns_none_for_unknown(self, auth_env):
+        init_auth_db()
+        assert auth.get_user("ghost") is None
+        assert auth.get_user("admin")["role"] == "admin"
 
     def test_authenticate_with_wrong_password_raises(self, auth_env):
         init_auth_db()

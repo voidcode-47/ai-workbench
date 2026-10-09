@@ -17,6 +17,8 @@ from pathlib import Path
 
 import numpy as np
 
+from app.exceptions import DimensionMismatchError
+
 
 @dataclass
 class VectorRecord:
@@ -74,7 +76,9 @@ class LocalVectorStore:
                 vectors = new_vectors
             else:
                 if data["vectors"].shape[1] != new_vectors.shape[1]:
-                    raise ValueError("向量维度与库中已有数据不一致，可能更换了 Embedding 模型，请重建索引")
+                    raise DimensionMismatchError(
+                        "向量维度与库中已有数据不一致，可能更换了 Embedding 模型，请重建索引"
+                    )
                 vectors = np.vstack([data["vectors"], new_vectors])
             meta = data["meta"] + [
                 {"id": r.id, "text": r.text, "metadata": r.metadata} for r in records
@@ -121,6 +125,13 @@ class LocalVectorStore:
 
         query = np.asarray(embedding, dtype=np.float32)
         vectors = data["vectors"]
+        # 换过 Embedding 模型但未重建索引时，矩阵乘法会抛出难懂的 numpy 形状错误；
+        # 这里提前给出可操作的提示
+        if query.ndim != 1 or query.shape[0] != vectors.shape[1]:
+            raise DimensionMismatchError(
+                f"查询向量维度（{query.shape[0] if query.ndim == 1 else '未知'}）与知识库中的"
+                f"（{vectors.shape[1]}）不一致，可能更换了 Embedding 模型，请重建索引"
+            )
         q_norm = np.linalg.norm(query) or 1.0
         v_norm = np.linalg.norm(vectors, axis=1)
         v_norm[v_norm == 0] = 1.0

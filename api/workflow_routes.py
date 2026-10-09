@@ -11,11 +11,12 @@ router = APIRouter(dependencies=[Depends(require_user)])
 
 
 @router.post("/run", response_model=WorkflowRunResponse, tags=["Workflow"])
-def run_workflow(payload: WorkflowRunRequest):
+def run_workflow(payload: WorkflowRunRequest, user: dict = Depends(require_user)):
     executor = get_workflow_executor()
     # 先显式校验，让定义错误以 400 返回
     executor.validate(payload.definition)
-    result = executor.run(payload.definition, payload.inputs)
+    # 传入当前用户：retrieval 节点依赖它做知识库权限校验
+    result = executor.run(payload.definition, payload.inputs, user=user)
     return WorkflowRunResponse(**result)
 
 

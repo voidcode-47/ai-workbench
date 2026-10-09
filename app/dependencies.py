@@ -1,7 +1,6 @@
 """公共依赖：鉴权、限流器、OpenAI 客户端、各模块服务单例。"""
 from __future__ import annotations
 
-import secrets
 import threading
 import time
 from collections import defaultdict, deque
@@ -15,28 +14,28 @@ from app.exceptions import AuthenticationError, ForbiddenError
 
 # ---------- 用户鉴权（Bearer token） ----------
 async def require_user(authorization: str | None = Header(default=None)) -> dict:
-    """从 Authorization: Bearer <token> 解析当前用户，返回 {"username","role"}。"""
-    from app.auth import verify_token
+    """从 Authorization: Bearer <token> 解析当前用户，返回 {"username","role"}。
+
+    验签之外必须回查数据库：仅验签的话，账号被删除或改密后旧 token 在有效期内
+    仍然可用（"已离职员工"仍能读数据）。角色也以库中为准，避免旧 token 携带过期角色。
+    """
+    from app.auth import get_user, verify_token
 
     if not authorization or not authorization.startswith("Bearer "):
         raise AuthenticationError("请先登录")
-    user = verify_token(authorization[7:].strip())
-    if user is None:
+    claims = verify_token(authorization[7:].strip())
+    if claims is None:
         raise AuthenticationError("登录已过期或无效，请重新登录")
-    return user
+    account = get_user(claims["username"])
+    if account is None or account["token_version"] != claims["token_version"]:
+        raise AuthenticationError("登录已失效，请重新登录")
+    return {"username": account["username"], "role": account["role"]}
 
 
 async def require_admin(user: dict = Depends(require_user)) -> dict:
     if user["role"] != "admin":
         raise ForbiddenError("需要管理员权限")
     return user
-
-
-# ---------- API Key 鉴权（旧接口兼容，未启用时不做校验） ----------
-async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
-    settings = get_settings()
-    if settings.api_key and not secrets.compare_digest(x_api_key or "", settings.api_key):
-        raise AuthenticationError("无效或缺失的 X-API-Key")
 
 
 # ---------- 滑动窗口限流器 ----------
@@ -75,7 +74,9 @@ class InMemoryRateLimiter:
 
 
 # ---------- OpenAI 兼容客户端 ----------
-@lru_cache(maxsize=4)
+# 无参缓存：等价于单例，但保留 cache_clear()，切换模型/端点后需要清掉
+# （客户端把 base_url / api_key 固化在实例上）
+@lru_cache(maxsize=1)
 def get_openai_client():
     """返回 OpenAI 兼容 SDK 客户端（base_url 可指向任意兼容服务）。"""
     from openai import OpenAI  # 延迟导入，降低模块加载成本
@@ -92,14 +93,15 @@ def get_openai_client():
 @lru_cache
 def get_rag_service():
     from rag.chat_chain import RAGChatChain
-    from rag.embeddings import get_embedder
+    from rag.embeddings import get_embedder_handle
     from rag.retriever import RAGService
     from rag.text_splitter import TextSplitter
     from rag.vector_store import LocalVectorStore
 
     settings = get_settings()
     store = LocalVectorStore(settings.vector_db_dir)
-    embedder = get_embedder(settings)
+    # 句柄而非单例：切换 Embedding 模型后无需重建 RAGService（重建会丢向量库内存缓存）
+    embedder = get_embedder_handle(settings)
     splitter = TextSplitter(settings.chunk_size, settings.chunk_overlap)
     return RAGService(store=store, embedder=embedder, splitter=splitter, settings=settings)
 

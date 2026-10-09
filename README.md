@@ -12,11 +12,11 @@
 | 工具 Agent | 计算器、日期、联网搜索、只读 SQL、文件读取、Python 执行（默认禁用，需 `ENABLE_PYTHON_TOOL=true` 开启）；ReAct 循环、步数限制、失败保护 | LangChain Tools、Function Calling、LangGraph |
 | 多模态 | 图片描述、视觉问答、OCR、表格图片转 Markdown | VLM 多模态接口、Base64、结构化 Prompt + 重试 |
 | 工作流 | input/llm/retrieval/tool/condition/output 六类节点，JSON 定义 DAG，条件路由、逐节点日志 | 拓扑排序、节点执行引擎、上下文模板传递 |
-| 工程化 | Pydantic 校验、统一异常、API Key 鉴权、滑动窗口限流、日志、Docker 部署 | FastAPI、中间件、Docker Compose |
+| 工程化 | Pydantic 校验、统一异常、账号登录鉴权（HMAC token）、滑动窗口限流、日志、Docker 部署 | FastAPI、中间件、Docker Compose |
 
-> 未配置 `OPENAI_API_KEY` 时，Embedding 自动降级为本地哈希向量（仅适合离线演示，无语义理解能力）；LLM / VLM 调用仍需密钥。
+> Embedding 优先走远端 OpenAI 兼容接口：配置了密钥、或端点指向本地/自建服务（如 LM Studio）时均使用真实向量；仅当端点是公开托管服务（OpenAI / DeepSeek / 智谱 / 通义 / Kimi）且未配置密钥时，才降级为本地哈希向量（无语义理解能力，仅适合离线演示）。LLM / VLM 调用仍需密钥。
 >
-> 安全默认：生产环境务必设置 `API_KEY`；跨域默认仅同源（配置 `CORS_ORIGINS` 白名单后放开）；`run_python` 默认禁用。
+> 安全默认：登录采用 HMAC 签名 token，改密或删除账号后旧 token 立即失效；首次登录后请务必修改默认管理员密码；跨域默认仅同源（配置 `CORS_ORIGINS` 白名单后放开）；`run_python` 默认禁用。
 
 ## 快速开始
 
@@ -40,7 +40,7 @@ Docker 方式：
 docker compose up --build
 ```
 
-## 主要 API（前缀 `/api/v1`，启用鉴权时需带 `X-API-Key`）
+## 主要 API（前缀 `/api/v1`，除 `/auth/login` 与 `/health` 外均需 `Authorization: Bearer <token>`）
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |

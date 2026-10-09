@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.exceptions import WorkflowExecutionError
+from app.exceptions import AppError, WorkflowExecutionError, WorkflowValidationError
 from workflow.engine import WorkflowEngine
 from workflow.nodes import NodeServices, run_node
 
@@ -19,7 +19,7 @@ class WorkflowExecutor:
     def validate(self, definition: dict) -> dict:
         return self.engine.validate(definition)
 
-    def run(self, definition: dict, inputs: dict | None = None) -> dict[str, Any]:
+    def run(self, definition: dict, inputs: dict | None = None, user: dict | None = None) -> dict[str, Any]:
         parsed = self.engine.validate(definition)
 
         def runner(node: dict, context: dict) -> tuple[Any, dict]:
@@ -31,9 +31,16 @@ class WorkflowExecutor:
                 inputs or {},
                 runner,
                 timeout=self.services.settings.workflow_timeout_seconds,
+                user=user,
             )
         except WorkflowExecutionError:
             raise
+        except AppError:
+            # 业务异常（如 retrieval 节点鉴权失败）原样抛出，保留 403/400 语义
+            raise
+        except ValueError as exc:
+            # 节点配置错误（缺 prompt、工具不在白名单等）属于请求问题，应为 400
+            raise WorkflowValidationError(f"工作流节点配置错误: {exc}") from exc
         except Exception as exc:
             logger.exception("工作流执行失败")
             raise WorkflowExecutionError(f"工作流执行失败: {exc}") from exc
