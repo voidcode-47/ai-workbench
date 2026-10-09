@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title=settings.app_name,
-    version="1.0.0",
+    version="0.2.0",
     description="企业知识库 RAG + 工具增强 Agent + 多模态理解 + 工作流编排",
 )
 

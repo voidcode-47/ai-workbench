@@ -1,8 +1,8 @@
 # AI Workbench
 
-**版本 0.1.0**
+**版本 0.2.0**
 
-一体化 AI 能力平台：**企业知识库 RAG + 工具增强 Agent + 多模态理解 + 可视化工作流编排**，基于 FastAPI 提供工程化服务，附带玻璃拟态前端与 RAG 评测脚本。
+一体化 AI 能力平台：**企业知识库 RAG + 工具增强 Agent + 多模态理解 + 可视化工作流编排**，基于 FastAPI 提供工程化服务，附带极简数字风格前端与 RAG 评测脚本。
 
 ## 功能模块
 
@@ -12,6 +12,7 @@
 | 工具 Agent | 计算器、日期、联网搜索、只读 SQL、文件读取、Python 执行（默认禁用，需 `ENABLE_PYTHON_TOOL=true` 开启）；ReAct 循环、步数限制、失败保护 | LangChain Tools、Function Calling、LangGraph |
 | 多模态 | 图片描述、视觉问答、OCR、表格图片转 Markdown | VLM 多模态接口、Base64、结构化 Prompt + 重试 |
 | 工作流 | input/llm/retrieval/tool/condition/output 六类节点，JSON 定义 DAG，条件路由、逐节点日志 | 拓扑排序、节点执行引擎、上下文模板传递 |
+| 模型管理 | 多提供商 OpenAI 兼容接入点配置、LLM/Embedding 热切换、连通性测试、模型列表拉取 | API Key 仅存本地、接口脱敏、管理员可写 |
 | 工程化 | Pydantic 校验、统一异常、账号登录鉴权（HMAC token）、滑动窗口限流、日志、Docker 部署 | FastAPI、中间件、Docker Compose |
 
 > Embedding 优先走远端 OpenAI 兼容接口：配置了密钥、或端点指向本地/自建服务（如 LM Studio）时均使用真实向量；仅当端点是公开托管服务（OpenAI / DeepSeek / 智谱 / 通义 / Kimi）且未配置密钥时，才降级为本地哈希向量（无语义理解能力，仅适合离线演示）。LLM / VLM 调用仍需密钥。
@@ -52,6 +53,9 @@ docker compose up --build
 | POST | `/rag/query` | 检索增强问答（返回 answer + citations） |
 | GET | `/agent/tools` | Agent 工具列表 |
 | POST | `/agent/chat` | Agent 对话（返回思考/工具调用/观察步骤） |
+| POST | `/agent/chat/stream` | Agent 流式对话（SSE 逐 token，网关不支持时自动降级整段） |
+| GET/POST/DELETE | `/models/config` | 模型接入配置查询/保存/清除（仅管理员，API Key 不回显） |
+| POST | `/models/test`、`/models/list` | 连通性测试 / 拉取可用模型列表（仅管理员） |
 | POST | `/multimodal/analyze` | 图片分析（task: describe/question/ocr/table） |
 | POST | `/workflow/run` | 执行 JSON 工作流定义 |
 | GET | `/workflow/templates` | 内置示例流程（文档问答/Agent 分析/图片理解/报告生成） |
